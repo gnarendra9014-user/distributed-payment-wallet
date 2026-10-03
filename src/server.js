@@ -104,10 +104,19 @@ app.post("/wallets/:userId/topup", async (req, res) => {
     }
 
     const transactionResult = await client.query(
-      `INSERT INTO transactions (user_id, type, amount, status)
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [userId, "TOPUP", amount, "SUCCESS"]
+      `INSERT INTO transactions
+      (user_id, sender_user_id, receiver_user_id, type, amount, status, idempotency_key)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *`,
+    [   
+      sender_user_id,
+      sender_user_id,
+      receiver_user_id,
+      "TRANSFER",
+      amount,
+      "SUCCESS",
+      idempotencyKey,
+      ]  
     );
 
     await client.query("COMMIT");
@@ -147,10 +156,33 @@ app.post('/users' ,async(req ,res) =>{
     }
 });
 
+
 app.post("/wallets/transfer", async (req, res) => {
   const client = await pool.connect();
 
   try {
+    const idempotencyKey = req.headers["idempotency-key"];
+
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        error: "Idempotency-Key header is required",
+      });
+    }
+
+    // Check if this payment was already processed
+    const existingTransaction = await client.query(
+      `SELECT * FROM transactions
+       WHERE idempotency_key = $1`,
+      [idempotencyKey]
+    );
+
+    if (existingTransaction.rows.length > 0) {
+      return res.status(200).json({
+        message: "Payment already processed",
+        transaction: existingTransaction.rows[0],
+      });
+    }
+
     const { sender_user_id, receiver_user_id, amount } = req.body;
 
     // Basic validation
@@ -166,7 +198,7 @@ app.post("/wallets/transfer", async (req, res) => {
       });
     }
 
-const numericAmount = Number(amount);
+    const numericAmount = Number(amount);
 
     if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
       return res.status(400).json({
@@ -176,7 +208,7 @@ const numericAmount = Number(amount);
 
     await client.query("BEGIN");
 
-    // Lock both wallets while the payment is being processed
+    // Lock both wallets while payment is being processed
     const walletResult = await client.query(
       `SELECT *
        FROM wallets
@@ -195,15 +227,15 @@ const numericAmount = Number(amount);
     }
 
     const senderWallet = walletResult.rows.find(
-      (wallet) => Number(wallet.user_id)=== Number(sender_user_id)
+      (wallet) => Number(wallet.user_id) === Number(sender_user_id)
     );
 
     const receiverWallet = walletResult.rows.find(
-      (wallet) => Number(wallet.user_id)=== Number(receiver_user_id)
+      (wallet) => Number(wallet.user_id) === Number(receiver_user_id)
     );
 
     // Check sender balance
-    if (Number(senderWallet.balance) < Number(amount)) {
+    if (Number(senderWallet.balance) < numericAmount) {
       await client.query("ROLLBACK");
 
       return res.status(400).json({
@@ -217,7 +249,7 @@ const numericAmount = Number(amount);
        SET balance = balance - $1
        WHERE user_id = $2
        RETURNING *`,
-      [amount, sender_user_id]
+      [numericAmount, sender_user_id]
     );
 
     // Add money to receiver
@@ -226,22 +258,23 @@ const numericAmount = Number(amount);
        SET balance = balance + $1
        WHERE user_id = $2
        RETURNING *`,
-      [amount, receiver_user_id]
+      [numericAmount, receiver_user_id]
     );
 
     // Create transaction record
     const transactionResult = await client.query(
       `INSERT INTO transactions
-       (user_id, sender_user_id, receiver_user_id, type, amount, status)
-       VALUES ($1, $2, $3, $4, $5, $6)
+       (user_id, sender_user_id, receiver_user_id, type, amount, status, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
       [
         sender_user_id,
         sender_user_id,
         receiver_user_id,
         "TRANSFER",
-        amount,
+        numericAmount,
         "SUCCESS",
+        idempotencyKey,
       ]
     );
 
@@ -256,6 +289,22 @@ const numericAmount = Number(amount);
   } catch (error) {
     await client.query("ROLLBACK");
 
+    // Handle duplicate idempotency key
+    if (error.code === "23505") {
+      const existingTransaction = await client.query(
+        `SELECT * FROM transactions
+         WHERE idempotency_key = $1`,
+        [idempotencyKey]
+      );
+
+      if (existingTransaction.rows.length > 0) {
+        return res.status(200).json({
+          message: "Payment already processed",
+          transaction: existingTransaction.rows[0],
+        });
+      }
+    }
+
     console.error(error);
 
     res.status(500).json({
@@ -265,29 +314,3 @@ const numericAmount = Number(amount);
     client.release();
   }
 });
-
-
-app.post("/users/:userId/wallet", async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    const result = await pool.query(
-      `INSERT INTO wallets (user_id)
-       VALUES ($1)
-       RETURNING *`,
-      [userId]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: "Failed to create wallet",
-    });
-  }
-});
-
-app.listen(process.env.PORT ,() =>{
-    console.log("The server is running on PORT 8000");
-})
