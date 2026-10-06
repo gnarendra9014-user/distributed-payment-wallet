@@ -6,7 +6,11 @@ const authenticateToken = require("./middleware/auth");
 require("dotenv").config();
 const pool =require('./config/db');
 console.log("Database:", process.env.DB_NAME);
-
+const { producer } = require("./config/kafka");
+const { publishPaymentEvent } = require("./services/kafkaProducer");
+const { startKafkaConsumer } = require("./services/kafkaConsumer");
+const { createOutboxEvent } = require("./services/outboxService");
+const { processOutboxEvents } = require("./services/outboxPublisher");
 const {
   getIdempotencyResult,
   saveIdempotencyResult,
@@ -124,6 +128,8 @@ app.post("/wallets/:userId/topup", async (req, res) => {
     );
 
     await client.query("COMMIT");
+
+ 
 
     res.status(201).json({
       message: "Wallet topped up successfully",
@@ -480,23 +486,37 @@ app.post("/wallets/transfer", authenticateToken, async (req, res) => {
         idempotencyKey,
       ]
     );
+    await createOutboxEvent(client, {
+  eventType: "PAYMENT_COMPLETED",
+  aggregateId: transactionResult.rows[0].id,
+  payload: {
+    event: "PAYMENT_COMPLETED",
+    transactionId: transactionResult.rows[0].id,
+    senderUserId: sender_user_id,
+    receiverUserId: receiver_user_id,
+    amount: numericAmount,
+  },
+});
 
     // --------------------------------------------------
     // 11. COMMIT DATABASE TRANSACTION
     // --------------------------------------------------
 
-    await client.query("COMMIT");
+   await client.query("COMMIT");
+
+
+  const responseData = {
+    message: "Payment transferred successfully",
+    sender_wallet: senderUpdate.rows[0],
+    receiver_wallet: receiverUpdate.rows[0],
+    transaction: transactionResult.rows[0],
+  };
 
     // --------------------------------------------------
     // 12. PREPARE RESPONSE
     // --------------------------------------------------
 
-    const responseData = {
-      message: "Payment transferred successfully",
-      sender_wallet: senderUpdate.rows[0],
-      receiver_wallet: receiverUpdate.rows[0],
-      transaction: transactionResult.rows[0],
-    };
+  
 
     // --------------------------------------------------
     // 13. SAVE SUCCESSFUL RESULT IN REDIS
@@ -875,29 +895,30 @@ app.post("/transactions/:transactionId/refund",
   }
 );
 
-
 async function startServer() {
   try {
     await redisClient.connect();
 
     console.log("Redis connected");
 
-    const testValue = await redisClient.get("test:key");
+    await producer.connect();
 
-    if (testValue) {
-      console.log("Redis test value:", testValue);
-    } else {
-      await redisClient.set("test:key", "hello");
-      console.log("Redis test value:", "hello");
-    }
+    console.log("Kafka producer connected");
+
+    await startKafkaConsumer();
 
     app.listen(PORT, () => {
       console.log(`The server is running on PORT ${PORT}`);
-    });
+
+    setInterval(() => {
+      processOutboxEvents();
+    }, 5000);
+  });
   } catch (error) {
     console.error("Server startup failed:", error);
   }
 }
+
 
 startServer();
 
