@@ -103,6 +103,14 @@ app.post("/wallets/:userId/topup", async (req, res) => {
 
     await client.query("BEGIN");
 
+    const numericAmount = Number(amount);
+
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({
+        error: "Amount must be a valid number greater than zero",
+      });
+    }
+
     const walletResult = await client.query(
       `UPDATE wallets
        SET balance = balance + $1
