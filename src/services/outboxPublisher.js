@@ -1,24 +1,23 @@
+
 const pool = require("../config/db");
 const { publishPaymentEvent } = require("./kafkaProducer");
 
 async function processOutboxEvents() {
-  const client = await pool.connect();
-
-try {
+  // Recover events stuck in PROCESSING for more than 30 seconds.
+  console.log("Outbox publisher is running...");
+  try {
     await pool.query(
       `UPDATE outbox_events
        SET status = 'PENDING',
            processing_at = NULL
        WHERE status = 'PROCESSING'
-       AND processing_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'`
+         AND processing_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'`
     );
   } catch (error) {
-    console.error(
-      "Failed to recover stale outbox events:",
-      error
-    );
+    console.error("Failed to recover stale outbox events:", error);
   }
 
+  const client = await pool.connect();
   let events = [];
 
   try {
@@ -32,6 +31,7 @@ try {
        LIMIT 10
        FOR UPDATE SKIP LOCKED`
     );
+    console.log("Pending outbox events found:", result.rows.length);
 
     events = result.rows;
 
@@ -44,18 +44,21 @@ try {
 
     await client.query(
       `UPDATE outbox_events
-       SET status = 'PROCESSING,
-            proccessing_at=CURRENT_TIMESTAMP'
+       SET status = 'PROCESSING',
+           processing_at = CURRENT_TIMESTAMP
        WHERE id = ANY($1::bigint[])`,
       [eventIds]
     );
 
     await client.query("COMMIT");
   } catch (error) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("Rollback failed:", rollbackError);
+    }
 
     console.error("Failed to claim outbox events:", error);
-
     return;
   } finally {
     client.release();
@@ -68,20 +71,14 @@ try {
         ...event.payload,
       });
 
-      const updateClient = await pool.connect();
-
-      try {
-        await updateClient.query(
-          `UPDATE outbox_events
-           SET status = 'PROCESSED',
-                proccessing_at=NULL,
-               processed_at = CURRENT_TIMESTAMP
-           WHERE id = $1`,
-          [event.id]
-        );
-      } finally {
-        updateClient.release();
-      }
+      await pool.query(
+        `UPDATE outbox_events
+         SET status = 'PROCESSED',
+             processing_at = NULL,
+             processed_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [event.id]
+      );
 
       console.log(
         `Outbox event ${event.id} published successfully`
@@ -92,22 +89,24 @@ try {
         publishError
       );
 
-      const retryClient = await pool.connect();
-
       try {
-        await retryClient.query(
+        await pool.query(
           `UPDATE outbox_events
            SET status = 'PENDING',
-                proccessing_At=NULL
+               processing_at = NULL
            WHERE id = $1`,
           [event.id]
         );
-      } finally {
-        retryClient.release();
+      } catch (retryError) {
+        console.error(
+          `Failed to reset outbox event ${event.id}:`,
+          retryError
+        );
       }
     }
   }
 }
+
 module.exports = {
   processOutboxEvents,
 };
