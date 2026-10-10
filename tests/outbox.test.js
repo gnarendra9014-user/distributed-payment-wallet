@@ -5,6 +5,8 @@ require("dotenv").config();
 const pool = require("../src/config/db");
 const { processOutboxEvents, MAX_RETRIES } = require("../src/services/outboxPublisher");
 
+const { producer } = require("../src/config/kafka");
+
 describe("Transactional Outbox Publisher & Dead-Letter Queue Tests", () => {
   let createdEventIds = [];
 
@@ -16,6 +18,7 @@ describe("Transactional Outbox Publisher & Dead-Letter Queue Tests", () => {
       ).catch(() => {});
     }
     await pool.end().catch(() => {});
+    await producer.disconnect().catch(() => {});
   });
 
   it("marks stale PROCESSING events that exceed MAX_RETRIES as FAILED", async () => {

@@ -42,6 +42,8 @@ describe("Payment and Wallet System Integration Tests", () => {
     if (redisClient.isOpen) {
       await redisClient.quit().catch(() => {});
     }
+    const { producer } = require("../src/config/kafka");
+    await producer.disconnect().catch(() => {});
   });
 
   // ----------------------------------------------------
