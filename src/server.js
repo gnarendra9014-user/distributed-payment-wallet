@@ -474,11 +474,11 @@ app.post("/wallets/transfer", authenticateToken, async (req, res) => {
     });
   }
 
-  // 2. Acquire Redis distributed lock
-  let lockAcquired = false;
+  // 2. Acquire Redis distributed lock (returns ownership token or null)
+  let lockToken = null;
   try {
-    lockAcquired = await acquireIdempotencyLock(idempotencyKey);
-    if (!lockAcquired) {
+    lockToken = await acquireIdempotencyLock(idempotencyKey);
+    if (!lockToken) {
       return res.status(409).json({
         error: "Payment with this idempotency key is already being processed",
       });
@@ -673,8 +673,8 @@ app.post("/wallets/transfer", authenticateToken, async (req, res) => {
       error: "Failed to transfer payment",
     });
   } finally {
-    if (lockAcquired) {
-      await releaseIdempotencyLock(idempotencyKey);
+    if (lockToken) {
+      await releaseIdempotencyLock(idempotencyKey, lockToken);
     }
     client.release();
   }
